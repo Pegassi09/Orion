@@ -19,13 +19,16 @@ const authCtrl = require("./controllers/auth"),
   db = require("./database/schema"),
   SqliteSessionStore = require("./services/sessionStore"),
   logger = require("./services/logger");
+const { registerShutdownHandlers, startNgrok } = require("./services/ngrok");
 // Instância HTTP e diretórios de arquivos gerados pela aplicação.
 const app = express(),
   PORT = process.env.PORT || 9090;
 const isServerless = Boolean(process.env.VERCEL);
 const runtimeDir = isServerless ? "/tmp" : __dirname;
 const runtimePath = (...parts) => path.join(runtimeDir, ...parts);
-["uploads", "backup", "logs"].forEach((x) => fs.mkdirSync(runtimePath(x), { recursive: true }));
+["uploads", "backup", "logs"].forEach((x) =>
+  fs.mkdirSync(runtimePath(x), { recursive: true }),
+);
 
 if (process.env.NODE_ENV === "production") {
   for (const [name, fallback] of [
@@ -43,6 +46,7 @@ const fieldLabels = {
   department: "Departamento",
   location: "Localização",
   responsible: "Responsável",
+  proprietary: "Nome do proprietário",
   brand: "Marca",
   model: "Modelo",
   serial_number: "Número de Série",
@@ -68,7 +72,9 @@ function escapeCsv(value) {
 function rowsToCsv(rows) {
   const columns = computers.fields;
   const header = columns.map((field) => fieldLabels[field] || field).join(";");
-  const body = rows.map((row) => columns.map((field) => escapeCsv(row[field])).join(";"));
+  const body = rows.map((row) =>
+    columns.map((field) => escapeCsv(row[field])).join(";"),
+  );
   return [header, ...body].join("\n");
 }
 
@@ -81,7 +87,10 @@ function normalizeImportRow(row) {
 }
 
 function validateBackupDatabase(filePath) {
-  const source = new Database(filePath, { readonly: true, fileMustExist: true });
+  const source = new Database(filePath, {
+    readonly: true,
+    fileMustExist: true,
+  });
   const hasTable = (table) =>
     source
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
@@ -94,7 +103,9 @@ function validateBackupDatabase(filePath) {
 
 function copyTable(source, table, columns) {
   db.prepare(`DELETE FROM ${table}`).run();
-  const rows = source.prepare(`SELECT ${columns.join(",")} FROM ${table}`).all();
+  const rows = source
+    .prepare(`SELECT ${columns.join(",")} FROM ${table}`)
+    .all();
   if (!rows.length) return;
   const placeholders = columns.map(() => "?").join(",");
   const insert = db.prepare(
@@ -110,7 +121,13 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://unpkg.com", "https://cdn.jsdelivr.net"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdn.tailwindcss.com",
+          "https://unpkg.com",
+          "https://cdn.jsdelivr.net",
+        ],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:"],
         connectSrc: ["'self'"],
@@ -185,28 +202,50 @@ app.get("/api/export/csv", auth, (req, res) => {
   const rows = computers.all();
   res.attachment("inventario.csv");
   res.type("text/csv; charset=utf-8");
-  logger.info("exportação CSV", { userId: req.session.user.id, count: rows.length });
+  logger.info("exportação CSV", {
+    userId: req.session.user.id,
+    count: rows.length,
+  });
   res.send(`\uFEFF${rowsToCsv(rows)}`);
 });
-app.get("/api/export/excel", auth, asyncRoute(async (req, res) => {
-  const rows = computers.all();
-  const schema = computers.fields.map((field) => ({
-    column: fieldLabels[field] || field,
-    type: field === "ram_gb" ? Number : String,
-    value: (row) => row[field] ?? "",
-  }));
-  const buffer = await writeXlsxFile(rows, { schema, buffer: true });
-  res.setHeader("Content-Disposition", "attachment; filename=inventario.xlsx");
-  res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  logger.info("exportação Excel", { userId: req.session.user.id, count: rows.length });
-  res.send(buffer);
-}));
+app.get(
+  "/api/export/excel",
+  auth,
+  asyncRoute(async (req, res) => {
+    const rows = computers.all();
+    const columns = computers.fields.map((field) => ({
+      header: { value: fieldLabels[field] || field, fontWeight: "bold" },
+      width: Math.max(14, (fieldLabels[field] || field).length + 2),
+      cell: (row) => ({
+        value:
+          field === "ram_gb" && row[field] !== null && row[field] !== undefined
+            ? Number(row[field])
+            : String(row[field] ?? ""),
+        type: field === "ram_gb" ? Number : String,
+      }),
+    }));
+    const buffer = await writeXlsxFile(rows, { columns }).toBuffer();
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=inventario.xlsx",
+    );
+    res.type(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    logger.info("exportação Excel", {
+      userId: req.session.user.id,
+      count: rows.length,
+    });
+    res.send(buffer);
+  }),
+);
 app.get("/api/export/pdf", auth, (req, res) =>
   makePdf(res, computers.all(), process.env.COMPANY_NAME || "Inventário de TI"),
 );
 app.get("/api/computers/:id/pdf", auth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "ID inválido" });
+  if (!Number.isSafeInteger(id) || id <= 0)
+    return res.status(400).json({ error: "ID inválido" });
   const c = db.prepare("SELECT * FROM computers WHERE id=?").get(id);
   if (!c) return res.status(404).json({ error: "Computador não encontrado" });
   makePdf(res, [c], process.env.COMPANY_NAME || "Inventário de TI");
@@ -222,7 +261,10 @@ const upload = multer({
 });
 app.post("/api/import/csv", auth, csrf, upload.single("file"), (req, res) => {
   try {
-    if (!req.file || path.extname(req.file.originalname).toLowerCase() !== ".csv") {
+    if (
+      !req.file ||
+      path.extname(req.file.originalname).toLowerCase() !== ".csv"
+    ) {
       return res.status(400).json({ error: "Envie um arquivo CSV válido" });
     }
     const rows = parse(fs.readFileSync(req.file.path), {
@@ -240,7 +282,11 @@ app.post("/api/import/csv", auth, csrf, upload.single("file"), (req, res) => {
     const tx = db.transaction(() =>
       rows.forEach((row) => {
         const normalized = normalizeImportRow(row);
-        if (normalized.hostname && normalized.department && normalized.location) {
+        if (
+          normalized.hostname &&
+          normalized.department &&
+          normalized.location
+        ) {
           stmt.run(...cols.map((k) => normalized[k] ?? null));
           count++;
         }
@@ -251,7 +297,8 @@ app.post("/api/import/csv", auth, csrf, upload.single("file"), (req, res) => {
     logger.info("importação CSV", { userId: req.session.user.id, count });
     res.json({ count });
   } catch (e) {
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (req.file?.path && fs.existsSync(req.file.path))
+      fs.unlinkSync(req.file.path);
     logger.warn("falha na importação CSV", { error: e.message });
     res.status(400).json({
       error:
@@ -261,39 +308,83 @@ app.post("/api/import/csv", auth, csrf, upload.single("file"), (req, res) => {
 });
 app.get("/api/backup", auth, (req, res) =>
   res.download(
-    process.env.DATABASE_PATH || (isServerless ? "/tmp/inventory.db" : path.join(__dirname, "database", "inventory.db")),
+    process.env.DATABASE_PATH ||
+      (isServerless
+        ? "/tmp/inventory.db"
+        : path.join(__dirname, "database", "inventory.db")),
     "backup-inventario.db",
   ),
 );
 app.post("/api/restore", auth, csrf, upload.single("file"), (req, res) => {
   try {
-    if (!req.file || ![".db", ".sqlite"].includes(path.extname(req.file.originalname).toLowerCase())) {
+    if (
+      !req.file ||
+      ![".db", ".sqlite"].includes(
+        path.extname(req.file.originalname).toLowerCase(),
+      )
+    ) {
       return res.status(400).json({ error: "Envie um backup SQLite válido" });
     }
     const source = validateBackupDatabase(req.file.path);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(
-      process.env.DATABASE_PATH || (isServerless ? "/tmp/inventory.db" : path.join(__dirname, "database", "inventory.db")),
+      process.env.DATABASE_PATH ||
+        (isServerless
+          ? "/tmp/inventory.db"
+          : path.join(__dirname, "database", "inventory.db")),
       runtimePath("backup", `antes-restauracao-${stamp}.db`),
     );
     db.transaction(() => {
-      copyTable(source, "audit_logs", ["id", "user_id", "action", "entity", "entity_id", "details", "created_at"]);
-      copyTable(source, "computers", ["id", ...computers.fields, "computer_password", "created_at", "updated_at"].filter((v, i, a) => a.indexOf(v) === i));
-      copyTable(source, "users", ["id", "name", "email", "password", "role", "created_at"]);
+      copyTable(source, "audit_logs", [
+        "id",
+        "user_id",
+        "action",
+        "entity",
+        "entity_id",
+        "details",
+        "created_at",
+      ]);
+      copyTable(
+        source,
+        "computers",
+        [
+          "id",
+          ...computers.fields,
+          "computer_password",
+          "created_at",
+          "updated_at",
+        ].filter((v, i, a) => a.indexOf(v) === i),
+      );
+      copyTable(source, "users", [
+        "id",
+        "name",
+        "email",
+        "password",
+        "role",
+        "created_at",
+      ]);
     })();
     source.close();
     fs.unlinkSync(req.file.path);
     logger.warn("backup restaurado", { userId: req.session.user.id });
-    req.session.destroy(() => res.json({ ok: true, message: "Backup restaurado. Faça login novamente." }));
+    req.session.destroy(() =>
+      res.json({
+        ok: true,
+        message: "Backup restaurado. Faça login novamente.",
+      }),
+    );
   } catch (e) {
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (req.file?.path && fs.existsSync(req.file.path))
+      fs.unlinkSync(req.file.path);
     logger.error("falha na restauração de backup", { error: e.message });
     res.status(400).json({ error: "Não foi possível restaurar este backup" });
   }
 });
 // Frontend SPA e tratamento final de erros inesperados.
-app.use(express.static(path.join(__dirname, "public"), { etag: false, maxAge: 0 }));
+app.use(
+  express.static(path.join(__dirname, "public"), { etag: false, maxAge: 0 }),
+);
 app.get("*", (req, res) =>
   res.sendFile(path.join(__dirname, "public", "index.html")),
 );
@@ -306,16 +397,20 @@ app.use((err, req, res, next) => {
   });
   res.status(500).json({ error: "Erro interno do servidor" });
 });
-process.on("unhandledRejection", (error) =>
-  logger.error("promise rejeitada sem tratamento", { error: error.message, stack: error.stack }),
-);
-process.on("uncaughtException", (error) =>
-  logger.error("exceção não capturada", { error: error.message, stack: error.stack }),
-);
-
 module.exports = app;
 
-if (!isServerless) app.listen(PORT, () => {
-  logger.info("servidor iniciado", { port: PORT, environment: process.env.NODE_ENV || "development" });
-  console.log(`Inventário disponível em http://localhost:${PORT}`);
-});
+if (!isServerless) {
+  registerShutdownHandlers(logger);
+  app.listen(PORT, async () => {
+    logger.info("servidor iniciado", {
+      port: PORT,
+      environment: process.env.NODE_ENV || "development",
+    });
+    const publicUrl = await startNgrok(PORT);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("🚀 Servidor iniciado com sucesso");
+    console.log(`🌐 Local:    http://localhost:${PORT}`);
+    if (publicUrl) console.log(`🔗 Ngrok:    ${publicUrl}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  });
+}

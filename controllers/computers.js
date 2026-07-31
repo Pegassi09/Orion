@@ -9,6 +9,7 @@ const fields = [
   "department",
   "location",
   "responsible",
+  "proprietary",
   "brand",
   "model",
   "serial_number",
@@ -44,6 +45,7 @@ const textLimits = {
   department: 120,
   location: 160,
   responsible: 120,
+  proprietary: 120,
   brand: 80,
   model: 120,
   serial_number: 160,
@@ -89,7 +91,9 @@ function valid(body) {
   if (!Number.isSafeInteger(ram) || ram < 1 || ram > 2048) {
     return "Informe uma quantidade de RAM válida entre 1 e 2048 GB";
   }
-  const capacity = Number.parseFloat(String(body.storage_capacity).replace(",", "."));
+  const capacity = Number.parseFloat(
+    String(body.storage_capacity).replace(",", "."),
+  );
   if (!Number.isFinite(capacity) || capacity <= 0) {
     return "Informe uma capacidade de armazenamento válida";
   }
@@ -107,7 +111,7 @@ function valid(body) {
 // Normaliza dados e cifra os únicos campos confidenciais.
 function data(body) {
   let o = {};
-  fields.forEach((k) => (o[k] = body[k] === "" ? null : body[k] ?? null));
+  fields.forEach((k) => (o[k] = body[k] === "" ? null : (body[k] ?? null)));
   o.ram_gb = Number.parseInt(body.ram_gb, 10);
   o.computer_password = encrypt(body.computer_password);
   return o;
@@ -162,7 +166,7 @@ exports.list = (req, res) => {
     .get(...p).total;
   const rows = db
     .prepare(
-      `SELECT id,hostname,department,location,responsible,brand,model,serial_number,operating_system,windows_version,windows_build,processor,ram_gb,ram_type,storage_type,storage_capacity,ip_address,updated_at FROM computers ${clause} ORDER BY ${col} ${order === "ASC" ? "ASC" : "DESC"} LIMIT ? OFFSET ?`,
+      `SELECT id,hostname,department,location,responsible,proprietary,brand,model,serial_number,operating_system,windows_version,windows_build,processor,ram_gb,ram_type,storage_type,storage_capacity,ip_address,updated_at FROM computers ${clause} ORDER BY ${col} ${order === "ASC" ? "ASC" : "DESC"} LIMIT ? OFFSET ?`,
     )
     .all(...p, pageSize, (currentPage - 1) * pageSize);
   res.json({
@@ -176,9 +180,7 @@ exports.list = (req, res) => {
 exports.get = (req, res) => {
   const id = idFrom(req);
   if (!id) return res.status(400).json({ error: "ID inválido" });
-  const row = db
-    .prepare("SELECT * FROM computers WHERE id=?")
-    .get(id);
+  const row = db.prepare("SELECT * FROM computers WHERE id=?").get(id);
   if (!row) return res.status(404).json({ error: "Computador não encontrado" });
   if (req.query.reveal === "true") {
     row.computer_password = decrypt(row.computer_password);
@@ -228,7 +230,8 @@ exports.update = (req, res) => {
       `UPDATE computers SET ${keys.map((k) => `${k}=?`).join(",")},updated_at=CURRENT_TIMESTAMP WHERE id=?`,
     ).run(...keys.map((k) => d[k]), id);
     const exists = db.prepare("SELECT changes() affected").get().affected;
-    if (!exists) return res.status(404).json({ error: "Computador não encontrado" });
+    if (!exists)
+      return res.status(404).json({ error: "Computador não encontrado" });
     audit(req.session.user, "UPDATE", "computer", id, d.hostname);
     res.json({ ok: true });
   } catch (e) {
@@ -239,7 +242,8 @@ exports.remove = (req, res) => {
   const id = idFrom(req);
   if (!id) return res.status(400).json({ error: "ID inválido" });
   const result = db.prepare("DELETE FROM computers WHERE id=?").run(id);
-  if (!result.changes) return res.status(404).json({ error: "Computador não encontrado" });
+  if (!result.changes)
+    return res.status(404).json({ error: "Computador não encontrado" });
   audit(req.session.user, "DELETE", "computer", id);
   res.json({ ok: true });
 };
