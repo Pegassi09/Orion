@@ -22,9 +22,10 @@ const authCtrl = require("./controllers/auth"),
 // Instância HTTP e diretórios de arquivos gerados pela aplicação.
 const app = express(),
   PORT = process.env.PORT || 9090;
-["uploads", "backup", "logs"].forEach((x) =>
-  fs.mkdirSync(path.join(__dirname, x), { recursive: true }),
-);
+const isServerless = Boolean(process.env.VERCEL);
+const runtimeDir = isServerless ? "/tmp" : __dirname;
+const runtimePath = (...parts) => path.join(runtimeDir, ...parts);
+["uploads", "backup", "logs"].forEach((x) => fs.mkdirSync(runtimePath(x), { recursive: true }));
 
 if (process.env.NODE_ENV === "production") {
   for (const [name, fallback] of [
@@ -123,9 +124,9 @@ app.use(
 app.use(compression());
 app.use(
   morgan("combined", {
-    stream: fs.createWriteStream(path.join(__dirname, "logs", "access.log"), {
-      flags: "a",
-    }),
+    stream: isServerless
+      ? process.stdout
+      : fs.createWriteStream(runtimePath("logs", "access.log"), { flags: "a" }),
   }),
 );
 app.use(express.json({ limit: "2mb" }));
@@ -212,7 +213,7 @@ app.get("/api/computers/:id/pdf", auth, (req, res) => {
 });
 // Upload limitado para importação de planilhas.
 const upload = multer({
-  dest: path.join(__dirname, "uploads"),
+  dest: runtimePath("uploads"),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, callback) => {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -260,7 +261,7 @@ app.post("/api/import/csv", auth, csrf, upload.single("file"), (req, res) => {
 });
 app.get("/api/backup", auth, (req, res) =>
   res.download(
-    path.join(__dirname, "database", "inventory.db"),
+    process.env.DATABASE_PATH || (isServerless ? "/tmp/inventory.db" : path.join(__dirname, "database", "inventory.db")),
     "backup-inventario.db",
   ),
 );
@@ -273,8 +274,8 @@ app.post("/api/restore", auth, csrf, upload.single("file"), (req, res) => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(
-      path.join(__dirname, "database", "inventory.db"),
-      path.join(__dirname, "backup", `antes-restauracao-${stamp}.db`),
+      process.env.DATABASE_PATH || (isServerless ? "/tmp/inventory.db" : path.join(__dirname, "database", "inventory.db")),
+      runtimePath("backup", `antes-restauracao-${stamp}.db`),
     );
     db.transaction(() => {
       copyTable(source, "audit_logs", ["id", "user_id", "action", "entity", "entity_id", "details", "created_at"]);
@@ -312,7 +313,9 @@ process.on("uncaughtException", (error) =>
   logger.error("exceção não capturada", { error: error.message, stack: error.stack }),
 );
 
-app.listen(PORT, () => {
+module.exports = app;
+
+if (!isServerless) app.listen(PORT, () => {
   logger.info("servidor iniciado", { port: PORT, environment: process.env.NODE_ENV || "development" });
   console.log(`Inventário disponível em http://localhost:${PORT}`);
 });

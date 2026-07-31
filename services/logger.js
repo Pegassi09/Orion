@@ -2,8 +2,9 @@
 const fs = require("fs");
 const path = require("path");
 
-const logDir = path.join(__dirname, "..", "logs");
-fs.mkdirSync(logDir, { recursive: true });
+const isServerless = Boolean(process.env.VERCEL);
+const logDir = isServerless ? null : path.join(__dirname, "..", "logs");
+if (logDir) fs.mkdirSync(logDir, { recursive: true });
 
 function write(level, message, meta = {}) {
   const entry = {
@@ -12,10 +13,8 @@ function write(level, message, meta = {}) {
     message,
     ...meta,
   };
-  fs.appendFileSync(
-    path.join(logDir, "application.log"),
-    `${JSON.stringify(entry)}\n`,
-  );
+  if (isServerless) console.log(JSON.stringify(entry));
+  else fs.appendFileSync(path.join(logDir, "application.log"), `${JSON.stringify(entry)}\n`);
 }
 
 module.exports = {
