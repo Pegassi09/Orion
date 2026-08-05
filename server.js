@@ -1,9 +1,13 @@
 /** Ponto de entrada: configura segurança, rotas da API e arquivos estáticos. */
 require("dotenv").config();
 const express = require("express"),
+  http = require("http"),
+  https = require("https"),
   path = require("path"),
   helmet = require("helmet"),
   compression = require("compression"),
+  cors = require("cors"),
+  cookieParser = require("cookie-parser"),
   session = require("express-session"),
   rateLimit = require("express-rate-limit"),
   morgan = require("morgan"),
@@ -22,11 +26,38 @@ const authCtrl = require("./controllers/auth"),
 const { registerShutdownHandlers, startNgrok } = require("./services/ngrok");
 // Instância HTTP e diretórios de arquivos gerados pela aplicação.
 const app = express(),
-  PORT = process.env.PORT || 9090;
+  PORT = Number(process.env.PORT || 9090),
+  HTTP_PORT = Number(process.env.HTTP_PORT || 8080);
+const HTTPS_PORT = Number(process.env.HTTPS_PORT || PORT);
+let activeHttpsPort = HTTPS_PORT;
+let activeHttpPort = HTTP_PORT;
 const isServerless = Boolean(process.env.VERCEL);
 const runtimeDir = isServerless ? "/tmp" : __dirname;
 const runtimePath = (...parts) => path.join(runtimeDir, ...parts);
-["uploads", "backup", "logs"].forEach((x) =>
+const sslKeyPath = process.env.SSL_KEY || path.join(__dirname, "certificados", "server.key");
+const sslCertPath = process.env.SSL_CERT || path.join(__dirname, "certificados", "server.crt");
+const sslCaPath = process.env.SSL_CA || path.join(__dirname, "certificados", "ca.crt");
+function loadHttpsOptions() {
+  const options = {
+    key: fs.readFileSync(sslKeyPath),
+    cert: fs.readFileSync(sslCertPath),
+  };
+  if (fs.existsSync(sslCaPath)) {
+    options.ca = fs.readFileSync(sslCaPath);
+  }
+  return options;
+}
+let httpsOptions;
+try {
+  httpsOptions = loadHttpsOptions();
+} catch (error) {
+  logger.warn("falha ao carregar certificados HTTPS", { error: error.message });
+  httpsOptions = {
+    key: fs.readFileSync(path.join(__dirname, "certificados", "server.key")),
+    cert: fs.readFileSync(path.join(__dirname, "certificados", "server.crt")),
+  };
+}
+["uploads", "backup", "logs", "certificados"].forEach((x) =>
   fs.mkdirSync(runtimePath(x), { recursive: true }),
 );
 
@@ -58,7 +89,7 @@ const fieldLabels = {
   operating_system: "Sistema Operacional",
   windows_version: "Versão Windows",
   windows_build: "Build",
-  ip_address: "Endereço IP",
+  ip_address: "Endereço IP ou MAC",
 };
 
 const asyncRoute = (handler) => (req, res, next) =>
@@ -84,6 +115,10 @@ function normalizeImportRow(row) {
     normalized[field] = row[field] ?? row[fieldLabels[field]] ?? null;
   }
   return normalized;
+}
+
+function resolveCompanyName(req) {
+  return req.session?.user?.company_name || process.env.COMPANY_NAME || "Inventário de TI";
 }
 
 function validateBackupDatabase(filePath) {
@@ -116,6 +151,7 @@ function copyTable(source, table, columns) {
 // Camada global: cabeçalhos seguros, compressão, log, parser e sessão.
 app.disable("x-powered-by");
 app.set("etag", false);
+app.set("trust proxy", 1);
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -136,9 +172,32 @@ app.use(
         frameAncestors: ["'none'"],
       },
     },
+    frameguard: { action: "deny" },
+    referrerPolicy: { policy: "no-referrer" },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
   }),
 );
+app.use((req, res, next) => {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  if (forwardedProto !== "https" && !req.secure) {
+    const host = req.headers.host?.split(":")[0] || "localhost";
+    return res.redirect(301, `https://${host}:${activeHttpsPort}${req.url}`);
+  }
+  next();
+});
 app.use(compression());
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  }),
+);
+app.use(cookieParser());
 app.use(
   morgan("combined", {
     stream: isServerless
@@ -240,7 +299,7 @@ app.get(
   }),
 );
 app.get("/api/export/pdf", auth, (req, res) =>
-  makePdf(res, computers.all(), process.env.COMPANY_NAME || "Inventário de TI"),
+  makePdf(res, computers.all(), resolveCompanyName(req)),
 );
 app.get("/api/computers/:id/pdf", auth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
@@ -248,7 +307,7 @@ app.get("/api/computers/:id/pdf", auth, (req, res) => {
     return res.status(400).json({ error: "ID inválido" });
   const c = db.prepare("SELECT * FROM computers WHERE id=?").get(id);
   if (!c) return res.status(404).json({ error: "Computador não encontrado" });
-  makePdf(res, [c], process.env.COMPANY_NAME || "Inventário de TI");
+  makePdf(res, [c], resolveCompanyName(req));
 });
 // Upload limitado para importação de planilhas.
 const upload = multer({
@@ -401,16 +460,75 @@ module.exports = app;
 
 if (!isServerless) {
   registerShutdownHandlers(logger);
-  app.listen(PORT, async () => {
-    logger.info("servidor iniciado", {
-      port: PORT,
-      environment: process.env.NODE_ENV || "development",
-    });
-    const publicUrl = await startNgrok(PORT);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("🚀 Servidor iniciado com sucesso");
-    console.log(`🌐 Local:    http://localhost:${PORT}`);
-    if (publicUrl) console.log(`🔗 Ngrok:    ${publicUrl}`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  });
+
+  function startHttpServer(port, fallbackStart) {
+    const maxAttempts = 5;
+    const tryListen = (currentPort, attempt) => {
+      const server = http.createServer(app);
+      const onError = (error) => {
+        if (error.code === "EADDRINUSE" && attempt < maxAttempts) {
+          logger.warn("porta HTTP ocupada, tentando próxima", {
+            port: currentPort,
+            nextPort: currentPort + 1,
+          });
+          server.close();
+          return tryListen(currentPort + 1, attempt + 1);
+        }
+        if (error.code === "EACCES") {
+          logger.warn("porta HTTP sem permissão", { port: currentPort });
+          return;
+        }
+        logger.error("erro no servidor HTTP", { error: error.message });
+      };
+      server.on("error", onError);
+      server.listen(currentPort, "0.0.0.0", () => {
+        server.removeListener("error", onError);
+        activeHttpPort = currentPort;
+        logger.info("servidor HTTP iniciado para redirecionamento", {
+          port: currentPort,
+        });
+        if (typeof fallbackStart === "function") fallbackStart(currentPort);
+      });
+    };
+    tryListen(port, 0);
+  }
+
+  function startHttpsServer(port) {
+    const maxAttempts = 5;
+    const tryListen = (currentPort, attempt) => {
+      const server = https.createServer(httpsOptions, app);
+      const onError = (error) => {
+        if (error.code === "EADDRINUSE" && attempt < maxAttempts) {
+          logger.warn("porta HTTPS ocupada, tentando próxima", {
+            port: currentPort,
+            nextPort: currentPort + 1,
+          });
+          server.close();
+          return tryListen(currentPort + 1, attempt + 1);
+        }
+        logger.error("erro no servidor HTTPS", { error: error.message });
+        process.exitCode = 1;
+      };
+      server.on("error", onError);
+      server.listen(currentPort, "0.0.0.0", async () => {
+        server.removeListener("error", onError);
+        logger.info("servidor HTTPS iniciado", {
+          port: currentPort,
+          environment: process.env.NODE_ENV || "development",
+        });
+        activeHttpsPort = currentPort;
+        const publicUrl = await startNgrok(currentPort);
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("🚀 Servidor iniciado com sucesso");
+        console.log(`🔐 HTTPS:    https://localhost:${currentPort}`);
+        console.log(`🔁 HTTP:     http://localhost:${activeHttpPort} -> https://localhost:${currentPort}`);
+        if (publicUrl) console.log(`🔗 Ngrok:    ${publicUrl}`);
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      });
+    };
+    tryListen(port, 0);
+  }
+
+  startHttpsServer(PORT);
+  startHttpServer(HTTP_PORT);
 }

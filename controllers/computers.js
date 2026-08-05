@@ -61,7 +61,8 @@ const textLimits = {
 };
 
 const validIpOrCidr =
-  /^(?:\d{1,3}\.){3}\d{1,3}(?:\/(?:[0-9]|[1-2][0-9]|3[0-2]))?$/;
+  /^(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(?:\/(?:[0-9]|[1-2][0-9]|3[0-2]))?$/;
+const validMacAddress = /^(?:[\da-f]{2}[:-]){5}[\da-f]{2}$/i;
 
 function toPositiveInteger(value, fallback, min, max) {
   const parsed = Number.parseInt(value, 10);
@@ -97,8 +98,12 @@ function valid(body) {
   if (!Number.isFinite(capacity) || capacity <= 0) {
     return "Informe uma capacidade de armazenamento válida";
   }
-  if (body.ip_address && !validIpOrCidr.test(body.ip_address)) {
-    return "Informe um endereço IP válido";
+  if (
+    body.ip_address &&
+    !validIpOrCidr.test(body.ip_address) &&
+    !validMacAddress.test(body.ip_address)
+  ) {
+    return "Informe um endereço IP ou MAC válido";
   }
   if (body.ram_type && !["DDR3", "DDR4", "DDR5"].includes(body.ram_type)) {
     return "Tipo de memória inválido";

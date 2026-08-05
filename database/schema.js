@@ -14,7 +14,7 @@ const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 db.exec(`
-CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT DEFAULT 'admin', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT DEFAULT 'admin', company_name TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS computers (
  id INTEGER PRIMARY KEY, hostname TEXT NOT NULL, department TEXT NOT NULL, location TEXT NOT NULL, responsible TEXT NOT NULL, proprietary TEXT, brand TEXT NOT NULL, model TEXT NOT NULL, serial_number TEXT NOT NULL,
  processor TEXT NOT NULL, ram_gb INTEGER NOT NULL, ram_type TEXT, storage_type TEXT NOT NULL, storage_capacity TEXT NOT NULL,
@@ -29,6 +29,11 @@ CREATE INDEX IF NOT EXISTS idx_computer_brand ON computers(brand);
 CREATE INDEX IF NOT EXISTS idx_computer_os ON computers(operating_system);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `);
+const userColumns = db.prepare("PRAGMA table_info(users)").all();
+if (!userColumns.some((column) => column.name === "company_name")) {
+  db.exec("ALTER TABLE users ADD COLUMN company_name TEXT");
+}
+
 // Migração: preserva somente os campos definidos no formulário simplificado.
 const computerColumns = db.prepare("PRAGMA table_info(computers)").all();
 if (computerColumns.some((column) => column.name === "asset_tag")) {

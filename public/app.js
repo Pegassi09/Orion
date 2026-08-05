@@ -27,7 +27,7 @@ const fields = [
   ["operating_system", "Sistema Operacional *"],
   ["windows_version", "Versão Windows"],
   ["windows_build", "Build"],
-  ["ip_address", "Endereço IP"],
+  ["ip_address", "Endereço IP ou MAC"],
   ["computer_password", "Senha do computador", "password"],
 ];
 const $ = (s) => document.querySelector(s);
@@ -65,16 +65,37 @@ function icon() {
 function download(u) {
   window.open(u, "_blank");
 }
+function resetAuthView() {
+  $("#authFormShell").classList.add("hidden");
+  $("#authSub").textContent = "Escolha uma opção para continuar";
+  document.querySelectorAll(".auth-flow-btn").forEach((btn) => btn.classList.remove("active"));
+}
+function setAuthView(mode) {
+  const isSignup = mode === "signup";
+  $("#authFormShell").classList.remove("hidden");
+  document.querySelectorAll(".auth-flow-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.flow === mode);
+  });
+  $("#setupName").classList.toggle("hidden", !isSignup);
+  $("#setupCompany").classList.toggle("hidden", !isSignup);
+  $("#authSub").textContent = isSignup
+    ? "Crie sua conta para começar"
+    : "Entre com suas credenciais";
+  $("#loginForm").dataset.setup = String(isSignup);
+  $("#submitButton").textContent = isSignup ? "Criar conta" : "Entrar com segurança";
+  location.hash = isSignup ? "#signup" : "#login";
+}
+function syncAuthView() {
+  if (location.hash === "#signup") return setAuthView("signup");
+  if (location.hash === "#login") return setAuthView("login");
+  return resetAuthView();
+}
 // Decide entre tela de acesso e aplicação autenticada.
 async function boot() {
   const s = await api("/api/auth/status");
   if (!s.user) {
     $("#auth").classList.remove("hidden");
-    $("#authSub").textContent = s.needsSetup
-      ? "Crie a conta de administrador inicial"
-      : "Acesse o gerenciamento de ativos";
-    $("#setupName").classList.toggle("hidden", !s.needsSetup);
-    $("#loginForm").dataset.setup = s.needsSetup;
+    syncAuthView();
     return;
   }
   csrf = s.csrf;
@@ -87,6 +108,7 @@ async function boot() {
 bind("#loginForm", "submit", async (e) => {
   e.preventDefault();
   let f = Object.fromEntries(new FormData(e.target));
+  if (f.companyName) f.companyName = f.companyName.trim();
   try {
     const r = await api(
       e.target.dataset.setup === "true" ? "/api/auth/setup" : "/api/auth/login",
@@ -97,6 +119,11 @@ bind("#loginForm", "submit", async (e) => {
   } catch (e) {
     toast(e.message, "error");
   }
+});
+bind("#flowLogin", "click", () => setAuthView("login"));
+bind("#flowSignup", "click", () => setAuthView("signup"));
+window.addEventListener("hashchange", () => {
+  if (!$("#auth").classList.contains("hidden")) syncAuthView();
 });
 bind("#logout", "click", async () => {
   await api("/api/auth/logout", { method: "POST" });

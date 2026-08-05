@@ -21,7 +21,7 @@ const columns = [
   ["Processador", 76],
   ["Memória RAM", 36],
   ["Armazenamento", 62],
-  ["Endereço IP", 65],
+  ["Endereço IP ou MAC", 65],
 ];
 
 function display(value) {
@@ -56,6 +56,7 @@ function makePdf(res, items, company) {
     size: "A4",
     bufferPages: true,
   });
+  const documentCompany = company || "Inventário de TI";
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", "inline; filename=inventario.pdf");
   doc.pipe(res);
@@ -83,7 +84,7 @@ function makePdf(res, items, company) {
         .font("Helvetica-Bold")
         .fontSize(18)
         .fillColor("#0f172a")
-        .text(company, PAGE_MARGIN, 30, {
+        .text(documentCompany, PAGE_MARGIN, 30, {
           width: TABLE_WIDTH,
         });
       doc
@@ -104,7 +105,7 @@ function makePdf(res, items, company) {
         .font("Helvetica-Bold")
         .fontSize(9)
         .fillColor("#0f172a")
-        .text(company, PAGE_MARGIN, 28, {
+        .text(documentCompany, PAGE_MARGIN, 28, {
           width: TABLE_WIDTH,
         });
       y = 43;

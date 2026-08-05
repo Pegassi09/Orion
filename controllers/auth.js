@@ -10,6 +10,10 @@ function normalizeEmail(email = "") {
   return String(email).trim().toLowerCase();
 }
 
+function normalizeCompanyName(companyName = "") {
+  return String(companyName).trim();
+}
+
 function startSession(req, user) {
   return new Promise((resolve, reject) => {
     req.session.regenerate((error) => {
@@ -26,25 +30,28 @@ exports.status = (req, res) =>
     user: req.session.user || null,
     csrf: req.session.csrf,
     needsSetup: !db.prepare("SELECT id FROM users LIMIT 1").get(),
+    companyName: req.session.user?.company_name || process.env.COMPANY_NAME || null,
   });
 exports.setup = async (req, res) => {
   if (db.prepare("SELECT id FROM users LIMIT 1").get())
     return res.status(409).json({ error: "Sistema já configurado" });
   const { name, password } = req.body;
   const email = normalizeEmail(req.body.email);
+  const companyName = normalizeCompanyName(req.body.companyName);
   if (!name || !emailPattern.test(email) || !password || password.length < 8)
     return res
       .status(422)
       .json({ error: "Informe nome, e-mail válido e senha de ao menos 8 caracteres" });
   const r = db
-    .prepare("INSERT INTO users(name,email,password) VALUES(?,?,?)")
-    .run(name, email, await bcrypt.hash(password, 12));
+    .prepare("INSERT INTO users(name,email,password,company_name) VALUES(?,?,?,?)")
+    .run(name, email, await bcrypt.hash(password, 12), companyName || null);
   logger.info("setup inicial concluído", { userId: r.lastInsertRowid, email });
   res.json(
     await startSession(req, {
       id: r.lastInsertRowid,
       name,
       email,
+      company_name: companyName || null,
       role: "admin",
     }),
   );
@@ -63,6 +70,7 @@ exports.login = async (req, res) => {
       id: u.id,
       name: u.name,
       email: u.email,
+      company_name: u.company_name || null,
       role: u.role,
     }),
   );
